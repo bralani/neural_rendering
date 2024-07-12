@@ -146,15 +146,20 @@ int main(int argc, char* argv[])
     char *ob = NULL;
 
 	struct options opts;
+	db = "C:\\Users\\m.balice\\Desktop\\rt_volume\\build\\Debug\\share\\db\\moss.g";	// path to the database
+	ob = "all.g";								// name of the object to render
 	opts.generate_dataset = true;				// set true if you want to generate the dataset, false if you want to perform a benchmark rendering
+	
+	// options for the dataset generation (useful only if generate_dataset=true)
 	opts.num_samples = 1000000;					// number of samples to generate
+	
+	// options for the rendering (useful only if generate_dataset=false)
+	opts.neural_render = 0;						// set to 1 if you want to perform a neural rendering, 0 if you want to perform a normal rendering	
 	opts.size = 256;							// size of the image (useful only if generate_dataset=false)
 	opts.model_path = "C:\\Users\\m.balice\\Desktop\\Rendernn\\models\\model_sph1.pt";	// path to the model (already trained)
 	opts.azim = 0;								// azimuth of the camera
 	opts.elev = 0;								// elevation of the camera
-	opts.neural_render = 0;						// set to 1 if you want to perform a neural rendering, 0 if you want to perform a normal rendering
-	db = "C:\\Users\\m.balice\\Desktop\\rt_volume\\build\\Debug\\share\\db\\moss.g";	// path to the database
-	ob = "all.g";								// name of the object to render
+
 
 	//get_options(argc, argv, &opts);
     //db = argv[bu_optind];
