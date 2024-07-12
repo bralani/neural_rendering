@@ -3,7 +3,7 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-# SET HERE YOUR VARIABILES #
+# SET HERE YOUR VARIABLES #
 size_neurons = 256          # Number of neurons in the hidden layers 
 batch_size = 512            # 512 is suitable for the GPU, if you have a CPU you should use a smaller batch size
 path_train_set = "/content/drive/MyDrive/train.json" # Path to the training set
