@@ -1,10 +1,76 @@
-import torch
-from simpleNet import NeuralNetwork
-from RenderDataset import RenderDatasetSph
-from torch.utils.data import DataLoader
-from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score
+import torch, json
 import torch.nn as nn
-import numpy as np
+from torch.utils.data import Dataset, DataLoader
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# SET HERE YOUR VARIABILES #
+size_neurons = 256          # Number of neurons in the hidden layers 
+batch_size = 512            # 512 is suitable for the GPU, if you have a CPU you should use a smaller batch size
+path_train_set = "/content/drive/MyDrive/train.json" # Path to the training set
+path_test_set = "/content/drive/MyDrive/test.txt" # Path to the test set
+# ------------------------- #
+
+# Device configuration
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
+
+
+class RenderDatasetSph(Dataset):
+    def __init__(self,data_dir="datas/sph_1.json",transform=None) -> None:
+        super().__init__()
+
+        self.transform = transform
+
+        with open(data_dir) as f:
+            self.datas = json.load(f)
+
+        self.data = []
+        for data in self.datas:
+
+            para = torch.Tensor(data["point_sph"] + data["dir_sph"])
+            label = torch.Tensor([data["label"]])
+
+            self.data.append((para, label))
+
+    def __getitem__(self, index):
+        para, label = self.data[index]
+
+        if self.transform is not None:
+            para = self.transform(para)
+            label = self.transform(label)
+
+        return para, label
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+
+class NeuralNetwork(nn.Module):
+    def __init__(self, size=64):
+        super().__init__()
+
+        self.model = nn.Sequential(
+            nn.Linear(4, size),
+            nn.ReLU(),
+            nn.Linear(size, size),
+            nn.ReLU(),
+            nn.Linear(size, size),
+            nn.ReLU(),
+            nn.Linear(size, size),
+            nn.ReLU(),
+            nn.Linear(size, 1),
+            # binary classification with sigmoid activation
+            nn.Sigmoid()
+
+        )
+
+    def forward(self, x):
+        return self.model(x)
+
 
 def loss_fn(output1, output2, target):
     loss1 = nn.BCELoss()(output1, target)
@@ -12,56 +78,40 @@ def loss_fn(output1, output2, target):
     return loss1 + loss2
 
 def train():
-    # Device configuration
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    model = NeuralNetwork(4, 256).to(device)
-    dataset = RenderDatasetSph(data_dir="datas/train.json")
-    dataset_loader = DataLoader(dataset,batch_size=512,shuffle=True)
-
-    # Load the dataset datas/test.txt with open
-    file_path = 'datas/test.txt'
+    model = NeuralNetwork(size_neurons).to(device)
+    dataset = RenderDatasetSph(data_dir=path_train_set)
+    dataset_loader = DataLoader(dataset,batch_size=batch_size,shuffle=True)
 
     max_acc = 0
 
     test_set = []
     test_set_labels = []
-    # Apri il file in modalità lettura
-    with open(file_path, 'r') as file:
-        # Leggi tutte le righe del file
+    with open(path_test_set, 'r') as file:
         lines = file.readlines()
 
-        # Per ogni riga del file
         for line in lines:
-            # Rimuovi gli spazi bianchi iniziali e finali
             line = line.strip()
-            # Dividi la riga in token
             tokens = line.split()
-            # Converti i token in numeri
             tokens = [float(token) for token in tokens]
-            # Aggiungi la riga alla lista
-            
-            tokens[0] /= torch.pi 
-            tokens[1] /= 2*torch.pi 
-            tokens[2] /= torch.pi 
-            tokens[3] /= 2*torch.pi 
-            
+
             test_set.append(tokens[:-1])
             test_set_labels.append(tokens[-1])
 
     test_set = torch.tensor(test_set).to(device)
     test_set_labels = torch.tensor(test_set_labels).to(device)
 
-
-    criterion = nn.BCELoss()
-    optimizer = torch.optim.RMSprop(model.parameters(), lr=0.001)
+    optimizer = torch.optim.NAdam(model.parameters(), lr=0.001)
 
     # Train the model
     total_step = len(dataset_loader)
     for epoch in range(200):
         for i, (para, labels) in enumerate(dataset_loader):
+
             # Move tensors to the configured device
             para = para.to(device)
             labels = labels.to(device)
+
+            optimizer.zero_grad()
 
             # Forward pass
             output1 = model(para)
@@ -72,10 +122,8 @@ def train():
             output2 = model(para2)
 
             loss = loss_fn(output1, output2, labels)
-            
 
             # Backward and optimize
-            optimizer.zero_grad()
             loss.backward()
             optimizer.step()
 
@@ -85,27 +133,26 @@ def train():
 
         all_preds = []
         with torch.no_grad():
-            for para in test_set:
-                outputs = model(para)
-                all_preds.append(outputs.item())
+            all_preds = model(test_set)
 
-        all_preds = np.array(all_preds)
         all_preds[all_preds > 0.5] = 1
         all_preds[all_preds <= 0.5] = 0
-        all_labels = test_set_labels.cpu().numpy()
+        all_preds = all_preds.cpu()
+        all_labels = test_set_labels.cpu()
 
-
-
+        f1 = f1_score(all_labels, all_preds)
         acc = accuracy_score(all_labels, all_preds)
+        
         if acc > max_acc:
             max_acc = acc
             example_input = torch.rand(2,4).to(device)
             traced_script_module = torch.jit.trace(model, example_input)
-            traced_script_module.save("models/model_sph1.pt")
+            traced_script_module.save("model_sph.pt")
 
         precision = precision_score(all_labels, all_preds)
         recall = recall_score(all_labels, all_preds)
 
+        print(f"F1: {f1}")
         print(f"Accuracy: {acc}")
         print(f"Precision: {precision}")
         print(f"Recall: {recall}")

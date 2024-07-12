@@ -58,6 +58,8 @@ set(rt_headers
   vlist.h
   wdb.h
   xray.h
+  rt_neural.h
+  rt_trainer.h
   )
 BRLCAD_MANAGE_FILES(rt_headers ${INCLUDE_DIR}/brlcad/rt REQUIRED librt)
 
