@@ -13,7 +13,7 @@ path_test_set = "/content/drive/MyDrive/test.txt" # Path to the test set
 # Device configuration
 if torch.cuda.is_available():
     device = torch.device('cuda')
-elif torch.mps.is_available():
+elif torch.backends.mps.is_available():
     device = torch.device('mps')
 else:
     device = torch.device('cpu')
@@ -99,6 +99,7 @@ def train():
 
     test_set = torch.tensor(test_set).to(device)
     test_set_labels = torch.tensor(test_set_labels).to(device)
+    all_labels = test_set_labels.cpu()
 
     optimizer = torch.optim.NAdam(model.parameters(), lr=0.001)
 
@@ -133,12 +134,9 @@ def train():
 
         all_preds = []
         with torch.no_grad():
-            all_preds = model(test_set)
+            all_preds = model(test_set).cpu().numpy()
 
-        all_preds[all_preds > 0.5] = 1
-        all_preds[all_preds <= 0.5] = 0
-        all_preds = all_preds.cpu()
-        all_labels = test_set_labels.cpu()
+        all_preds = [1 if pred > 0.5 else 0 for pred in all_preds]
 
         f1 = f1_score(all_labels, all_preds)
         acc = accuracy_score(all_labels, all_preds)

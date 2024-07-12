@@ -77,7 +77,6 @@ int run_torch(double* para)
     
     // inputs.push_back(input_tensor);
     at::Tensor output = module.forward(inputs).toTensor().to(device_torch);
-    auto tmp = output.data_ptr<float>();
     std::vector<double> output_vector(output.data_ptr<float>(), output.data_ptr<float>() + output.numel());
     float res = float(output_vector[0]);
     
