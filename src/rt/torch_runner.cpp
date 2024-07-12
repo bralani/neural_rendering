@@ -15,7 +15,7 @@ void set_model_path(const char* model_path)
         file(model_path);
     if (!file)
     {
-        std::cout << "Model file does not exist" << std::endl;
+        std::cout << "Model file does not exist, error!" << std::endl;
         throw;
     }
 
