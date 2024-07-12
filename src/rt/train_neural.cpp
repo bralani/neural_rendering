@@ -34,21 +34,26 @@ struct options
 	bool generate_dataset;
 	int num_samples;
 	int size;
+	double azim;
+	double elev;
 	std::string model_path;
+	int neural_render;
 };
 
 static void
 get_options(int argc, char *argv[], struct options *opts)
 {
-    static const char *usage = "Usage: %s [-d] [-n #samples] [-m ...path_model.pt] [-s #size_img] model.g nameObject \n -d if you want to generate the dataset (1) or if you want to perform a benchmark rendering (0) \n -n #samples if you want to specify the number of rays to train the NN (default 1 million) \n -size of the image (default 256)";
+    static const char *usage = "Usage: %s [-d] [-n #samples] [-m ...path_model.pt] [-s #size_img] [-a azimuth] [-e elevation] [-v] model.g nameObject \n -d if you want to generate the dataset (1) or if you want to perform a benchmark rendering (0) \n -n #samples if you want to specify the number of rays to train the NN (default 1 million) \n -size of the image (default 256) \n -a azimuth of the camera \n -e elevation of the camera \n -v to perform a neural rendering";
 
     const char *argv0 = argv[0];
     const char *db = NULL;
     const char *obj = NULL;
 
 
+    bu_optind = 1;
+
     int c, d;
-    while ((c = bu_getopt(argc, (char * const *)argv, "dn:h?")) != -1) {
+    while ((c = bu_getopt(argc, (char * const *)argv, "dn:m:s:a:e:vh?")) != -1) {
 	if (bu_optopt == '?')
 	    c = 'h';
 
@@ -64,9 +69,24 @@ get_options(int argc, char *argv[], struct options *opts)
 		    opts->size = (size_t)strtol(bu_optarg, NULL, 10);
 		break;
 
+		case 'a':
+			if (opts)
+				opts->azim = (double)strtol(bu_optarg, NULL, 10);
+		break;
+
+		case 'e':
+			if (opts)
+				opts->elev = (double)strtol(bu_optarg, NULL, 10);
+		break;
+
+		case 'v':
+			if (opts)
+				opts->neural_render = 1;
+
 		case 'm':
 			if (opts)
 				opts->model_path = bu_optarg;
+		break;
 
 	    case 'd':
 		if (opts)
@@ -89,9 +109,11 @@ get_options(int argc, char *argv[], struct options *opts)
 
     /* final sanity checks */
     if (!db || !bu_file_exists(db, NULL)) {
+	bu_log(usage);
 	bu_exit(EXIT_FAILURE, "ERROR: database %s not found\n", (db)?db:"[]");
     }
     if (!obj) {
+	bu_log(usage);
 	bu_exit(EXIT_FAILURE, "ERROR: object(s) not specified\n");
     }
 }
@@ -116,37 +138,27 @@ void generate_renders_test_set(int num_renders)
 	set_generate_test_set(0);
 }
 
-void benchmarks(int num_renders) {
-
-	for (int i = 0; i < num_renders; i++)
-	{
-		do_ae(rt_sample::RandomNum(-180, 180), rt_sample::RandomNum(-30, 30));
-
-		set_type(render_type::neural);
-		rt_neu::render();
-
-		set_type(render_type::normal);
-		rt_neu::render();
-	}
-}
-
 
 int main(int argc, char* argv[])
 {
-	struct options opts;
-	opts.generate_dataset = true;
-	opts.num_samples = 1000000;
-	opts.size = 256;
-	opts.model_path = "";
-
+	
     char *db = NULL;
     char *ob = NULL;
 
-	get_options(argc, argv, &opts);
+	struct options opts;
+	opts.generate_dataset = true;				// set true if you want to generate the dataset, false if you want to perform a benchmark rendering
+	opts.num_samples = 1000000;					// number of samples to generate
+	opts.size = 256;							// size of the image (useful only if generate_dataset=false)
+	opts.model_path = "C:\\Users\\m.balice\\Desktop\\Rendernn\\models\\model_sph1.pt";	// path to the model (already trained)
+	opts.azim = 0;								// azimuth of the camera
+	opts.elev = 0;								// elevation of the camera
+	opts.neural_render = 0;						// set to 1 if you want to perform a neural rendering, 0 if you want to perform a normal rendering
+	db = "C:\\Users\\m.balice\\Desktop\\rt_volume\\build\\Debug\\share\\db\\moss.g";	// path to the database
+	ob = "all.g";								// name of the object to render
+
+	//get_options(argc, argv, &opts);
     //db = argv[bu_optind];
-    //ob = argv + bu_optind + 1;
-	db = "C:\\Users\\m.balice\\Desktop\\rt_volume\\build\\Debug\\share\\db\\moss.g";
-	ob = "all.g";
+    //ob = argv[bu_optind + 1];
 
     bu_log(" db is %s\n", db);
     bu_log(" obj is %s\n", ob);
@@ -154,7 +166,7 @@ int main(int argc, char* argv[])
 	struct rt_i* rtip = NULL;
 	set_size(opts.size);
 	rt_tool::init_rt(db, ob, rtip);
-	do_ae(-90, 0);
+	do_ae(opts.azim, opts.elev);
 	//rt_perspective = 90;
 	//eye_model[0] = (fastf_t)10000.0;
 	//eye_model[1] = (fastf_t)10000.0;
@@ -178,14 +190,15 @@ int main(int argc, char* argv[])
 
 		generate_renders_test_set(20);
 	} else {
-		bu_log("we\n");
-
 		set_model_path(opts.model_path.c_str());
-		bu_log("we1\n");
-		//benchmarks(5);
 
-		set_type(render_type::neural);
-		bu_log("we2\n");
+		if (opts.neural_render) {
+			set_type(render_type::neural);
+		}
+		else {
+			set_type(render_type::normal);
+		}
+
 		rt_neu::render();
 	}
 
