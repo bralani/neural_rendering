@@ -28,6 +28,7 @@
 #include "bu/getopt.h"
 #include "vmath.h"
 
+extern char* outputfile;
 struct options
 {
 	bool generate_dataset;
@@ -120,7 +121,7 @@ get_options(int argc, char *argv[], struct options *opts)
 */
 
 
-void generate_renders_test_set(int num_renders)
+void generate_renders_test_set(int num_renders, const char *db, const char *ob, struct rt_i *rtip)
 {
 	
 	// make a file to write the test set
@@ -130,9 +131,14 @@ void generate_renders_test_set(int num_renders)
 
 	// test set
 	set_generate_test_set(1);
+	set_type(render_type::neural);
+	
 	for (int i = 0; i < num_renders; i++)
 	{
+		rt_tool::init_rt(db, ob, rtip);
 		do_ae(rt_sample::RandomNum(-180, 180), rt_sample::RandomNum(-30, 30));
+
+		outputfile = (char*)"./output.png";
 		rt_neu::render();
 	}
 	set_generate_test_set(0);
@@ -194,17 +200,18 @@ int main()
 		// training set
 		util::write_sph_json(ray_list_spherical, ray_res, "./train_neural.json");
 
-		generate_renders_test_set(20);
+		generate_renders_test_set(15, db, ob, rtip);
 	} else {
-		set_model_path(opts.model_path.c_str());
 
 		if (opts.neural_render) {
+			set_model_path(opts.model_path.c_str());
 			set_type(render_type::neural);
 		}
 		else {
 			set_type(render_type::normal);
 		}
 
+		outputfile = (char*)"./output.png";
 		rt_neu::render();
 	}
 
