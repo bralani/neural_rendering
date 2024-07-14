@@ -207,7 +207,6 @@ rt_bot_remove_faces(struct bu_ptbl *rm_face_indices, const struct rt_bot_interna
 /* Function to copy an rt_bot_internal structure */
 RT_EXPORT struct rt_bot_internal *
 rt_bot_dup(const struct rt_bot_internal *bot);
-
 /** @} */
 
 __END_DECLS

@@ -61,7 +61,7 @@
 
 #include "./rtuif.h"
 #include "./ext.h"
-
+#include "rt/torch_runner.h"
 
 extern struct fb *fbp;			/* Framebuffer handle */
 
@@ -526,6 +526,345 @@ view_pixel(struct application *ap)
     }
 }
 
+void
+view_pixel_neural(struct application* ap, int generate_dataset)
+{
+	int r, g, b;
+	unsigned char* pixelp;
+	struct scanline* slp;
+	int do_eol = 0;
+
+	point_t center;
+	VSETALL(center, 0.0);
+	VADD2SCALE(center, APP.a_rt_i->rti_pmin, APP.a_rt_i->rti_pmax, 0.5);
+
+	vect_t intersection1, intersection2;
+	int intersection =  hit_sphere(center, ap->a_rt_i->rti_radius, &ap->a_ray, &intersection1, &intersection2);
+	if (intersection == 0)
+	{
+		ap->a_user = 0;
+		r = background[0];
+		g = background[1];
+		b = background[2];
+	}
+	else
+	{
+		double para[5];
+		para[0] = 3;
+
+		convert_to_sph_point(intersection1, center, ap->a_rt_i->rti_radius, para);
+		convert_to_sph_point(intersection2, center, ap->a_rt_i->rti_radius, para + 2);
+
+		if(generate_dataset) {
+			(void)rt_shootray(ap);
+
+			// append to file
+			FILE* file = fopen("./test_neural.txt", "a");
+			fprintf(file, "%f %f %f %f %d\n", para[1], para[2], para[3], para[4], ap->a_user);
+			fclose(file);
+
+			r = background[0];
+			g = background[1];
+			b = background[2];
+		} else {
+			int res = run_torch(para);
+			if(res) { 
+				ap->a_user = 1;
+				r = g = b = 255;
+			} else {
+				ap->a_user = 0;
+				r = background[0];
+				g = background[1];
+				b = background[2];
+			}
+		}
+	}
+	
+
+	if (OPTICAL_DEBUG & OPTICAL_DEBUG_HITS) bu_log("rgb=%3d, %3d, %3d xy=%3d, %3d (%g, %g, %g)\n",
+		r, g, b, ap->a_x, ap->a_y,
+		V3ARGS(ap->a_color));
+
+	switch (buf_mode) {
+
+	case BUFMODE_FULLFLOAT:
+	{
+		/* No output semaphores required for word-width memory
+		 * writes.
+		 */
+		struct floatpixel* fp;
+		fp = &curr_float_frame[ap->a_y * width + ap->a_x];
+		fp->ff_frame = curframe;
+		fp->ff_color[0] = r;
+		fp->ff_color[1] = g;
+		fp->ff_color[2] = b;
+		fp->ff_x = ap->a_x;
+		fp->ff_y = ap->a_y;
+		if (ap->a_user == 0) {
+			fp->ff_dist = -INFINITY;	/* shot missed model */
+			fp->ff_frame = -1;		/* Don't cache misses */
+			return;
+		}
+		/* XXX a_dist is negative and misleading when eye is in air */
+		fp->ff_dist = (float)ap->a_dist;
+		VJOIN1(fp->ff_hitpt, ap->a_ray.r_pt,
+			ap->a_dist, ap->a_ray.r_dir);
+		fp->ff_regp = (struct region*)ap->a_uptr;
+		RT_CK_REGION(fp->ff_regp);
+		/*
+		 * This pixel was just computed.  Look at next pixel
+		 * on scanline, and if it is a reprojected old value
+		 * and hit a different region than this pixel, then
+		 * recompute it too.
+		 */
+		if ((size_t)ap->a_x >= width - 1)
+			return;
+		if (fp[1].ff_frame <= 0)
+			return;	/* not valid, will be recomputed. */
+		if (fp[1].ff_regp == fp->ff_regp)
+			return;				/* OK */
+
+		/* Next pixel is probably out of date, mark it for
+		 * re-computing
+		 */
+		fp[1].ff_frame = -1;
+		return;
+	}
+
+	case BUFMODE_UNBUF:
+	{
+		RGBpixel p;
+		int npix;
+
+		p[0] = r;
+		p[1] = g;
+		p[2] = b;
+
+		if (bif != NULL) {
+			icv_writepixel(bif, ap->a_x, ap->a_y, ap->a_color);
+		}
+		else if (outfp != NULL) {
+			bu_semaphore_acquire(BU_SEM_SYSCALL);
+			if (bu_fseek(outfp, (ap->a_y * width * pwidth) + (ap->a_x * pwidth), 0) != 0)
+				fprintf(stderr, "fseek error\n");
+			if (fwrite(p, 3, 1, outfp) != 1)
+				bu_exit(EXIT_FAILURE, "pixel fwrite error");
+			bu_semaphore_release(BU_SEM_SYSCALL);
+		}
+
+		if (fbp != FB_NULL) {
+			/* Framebuffer output */
+			bu_semaphore_acquire(BU_SEM_SYSCALL);
+			npix = fb_write(fbp, ap->a_x, ap->a_y,
+				(const unsigned char*)p, 1);
+			bu_semaphore_release(BU_SEM_SYSCALL);
+			if (npix < 1)
+				bu_exit(EXIT_FAILURE, "pixel fb_write error");
+		}
+	}
+	return;
+
+#ifdef RTSRV
+	case BUFMODE_RTSRV:
+		/* Multi-pixel buffer */
+		pixelp = scanbuf + pwidth * ((ap->a_y * width) + ap->a_x - srv_startpix);
+		bu_semaphore_acquire(RT_SEM_RESULTS);
+		*pixelp++ = r;
+		*pixelp++ = g;
+		*pixelp++ = b;
+		bu_semaphore_release(RT_SEM_RESULTS);
+		return;
+#endif
+
+		/*
+		 * Store results into pixel buffer.  Don't depend on
+		 * interlocked hardware byte-splice.  Need to protect
+		 * scanline[].sl_left when in parallel mode.
+		 */
+
+	case BUFMODE_DYNAMIC:
+		slp = &scanline[ap->a_y];
+		bu_semaphore_acquire(RT_SEM_RESULTS);
+		if (slp->sl_buf == (unsigned char*)0) {
+			slp->sl_buf = (unsigned char*)bu_calloc(width, pwidth, "sl_buf scanline buffer");
+		}
+		pixelp = slp->sl_buf + (ap->a_x * pwidth);
+		*pixelp++ = r;
+		*pixelp++ = g;
+		*pixelp++ = b;
+		if (--(slp->sl_left) <= 0)
+			do_eol = 1;
+		bu_semaphore_release(RT_SEM_RESULTS);
+		break;
+
+		/*
+		 * Only one CPU is working on this scanline, no parallel
+		 * interlock required! Much faster.
+		 */
+	case BUFMODE_SCANLINE:
+		slp = &scanline[ap->a_y];
+		if (slp->sl_buf == (unsigned char*)0) {
+			slp->sl_buf = (unsigned char*)bu_calloc(width, pwidth, "sl_buf scanline buffer");
+		}
+		pixelp = slp->sl_buf + (ap->a_x * pwidth);
+		*pixelp++ = r;
+		*pixelp++ = g;
+		*pixelp++ = b;
+		if (--(slp->sl_left) <= 0)
+			do_eol = 1;
+		break;
+
+	case BUFMODE_INCR:
+	{
+		size_t dx, dy;
+		size_t spread;
+
+		spread = 1 << (incr_nlevel - incr_level);
+
+		bu_semaphore_acquire(RT_SEM_RESULTS);
+		for (dy = 0; dy < spread; dy++) {
+			if ((size_t)ap->a_y + dy >= height) break;
+			slp = &scanline[ap->a_y + dy];
+			if (slp->sl_buf == (unsigned char*)0)
+				slp->sl_buf = (unsigned char*)bu_calloc(width + 32,
+					pwidth, "sl_buf scanline buffer");
+
+			pixelp = slp->sl_buf + (ap->a_x * pwidth);
+			for (dx = 0; dx < spread; dx++) {
+				*pixelp++ = r;
+				*pixelp++ = g;
+				*pixelp++ = b;
+			}
+		}
+		/* First 3 incremental iterations are boring */
+		if (incr_level > 3) {
+			if (--(scanline[ap->a_y].sl_left) <= 0)
+				do_eol = 1;
+		}
+		bu_semaphore_release(RT_SEM_RESULTS);
+	}
+	break;
+
+	case BUFMODE_ACC:
+	{
+		unsigned int i;
+		fastf_t* psum_p;
+		fastf_t* tmp_pixel;
+		int tmp_color;
+
+		/* Scanline buffered mode */
+		bu_semaphore_acquire(RT_SEM_RESULTS);
+
+		tmp_pixel = (fastf_t*)bu_calloc(pwidth, sizeof(fastf_t), "tmp_pixel");
+		VMOVE(tmp_pixel, ap->a_color);
+
+		psum_p = &psum_buffer[ap->a_y * width * pwidth + ap->a_x * pwidth];
+		slp = &scanline[ap->a_y];
+		if (slp->sl_buf == (unsigned char*)0) {
+			slp->sl_buf = (unsigned char*)bu_calloc(width, pwidth, "sl_buf scanline buffer");
+		}
+		pixelp = slp->sl_buf + (ap->a_x * pwidth);
+		/* Update the partial sums and the scanline */
+		for (i = 0; i < pwidth; i++) {
+			psum_p[i] += tmp_pixel[i];
+			/* change the float interval to [0, 255] and round to
+			   the nearest integer */
+			tmp_color = psum_p[i] * 255.0 / full_incr_sample + 0.5;
+			/* clamp */
+			pixelp[i] = tmp_color < 0 ? 0 : tmp_color > 255 ? 255 : tmp_color;
+		}
+		bu_free(tmp_pixel, "tmp_pixel");
+
+		bu_semaphore_release(RT_SEM_RESULTS);
+		if (--(slp->sl_left) <= 0)
+			do_eol = 1;
+	}
+	break;
+
+	default:
+		bu_exit(EXIT_FAILURE, "bad buf_mode: %d", buf_mode);
+	}
+
+
+	if (!do_eol)
+		return;
+
+	switch (buf_mode) {
+	case BUFMODE_INCR:
+	{
+		long dy, yy;
+		long spread;
+		size_t npix = 0;
+
+		if (fbp == FB_NULL)
+			bu_exit(EXIT_FAILURE, "Incremental rendering with no framebuffer?");
+
+		spread = (1 << (incr_nlevel - incr_level)) - 1;
+		bu_semaphore_acquire(BU_SEM_SYSCALL);
+		for (dy = spread; dy >= 0; dy--) {
+			yy = ap->a_y + dy;
+			if (sub_grid_mode) {
+				if (dy < sub_ymin || dy > sub_ymax)
+					continue;
+				npix = fb_write(fbp, sub_xmin, yy,
+					(unsigned char*)scanline[yy].sl_buf + 3 * sub_xmin,
+					sub_xmax - sub_xmin + 1);
+				if (npix != (size_t)sub_xmax - (size_t)sub_xmin + 1) break;
+			}
+			else {
+				npix = fb_write(fbp, 0, yy,
+					(unsigned char*)scanline[yy].sl_buf,
+					width);
+				if (npix != width) break;
+			}
+		}
+		bu_semaphore_release(BU_SEM_SYSCALL);
+		if (npix != width) bu_exit(EXIT_FAILURE, "fb_write error (incremental res)");
+	}
+	break;
+
+	case BUFMODE_ACC:
+	case BUFMODE_SCANLINE:
+	case BUFMODE_DYNAMIC:
+		if (fbp != FB_NULL) {
+			size_t npix;
+			bu_semaphore_acquire(BU_SEM_SYSCALL);
+			if (sub_grid_mode) {
+				npix = fb_write(fbp, sub_xmin, ap->a_y,
+					(unsigned char*)scanline[ap->a_y].sl_buf + 3 * sub_xmin,
+					sub_xmax - sub_xmin + 1);
+			}
+			else {
+				npix = fb_write(fbp, 0, ap->a_y,
+					(unsigned char*)scanline[ap->a_y].sl_buf, width);
+			}
+			bu_semaphore_release(BU_SEM_SYSCALL);
+			if (sub_grid_mode) {
+				if (npix < (size_t)sub_xmax - (size_t)sub_xmin - 1) {
+					bu_log("WARNING: scanline error (wrote %zu of %zu pixels)", npix, (size_t)sub_xmax - sub_xmin - 1);
+				}
+			}
+		}
+		if (bif != NULL) {
+			/* TODO : Add double type data to maintain resolution */
+			icv_writeline(bif, ap->a_y, (unsigned char*)scanline[ap->a_y].sl_buf, ICV_DATA_UCHAR);
+		}
+		else if (outfp != NULL) {
+			size_t count;
+
+			bu_semaphore_acquire(BU_SEM_SYSCALL);
+			if (bu_fseek(outfp, ap->a_y * width * pwidth, 0) != 0)
+				fprintf(stderr, "fseek error\n");
+			count = fwrite(scanline[ap->a_y].sl_buf,
+				sizeof(char), width * pwidth, outfp);
+			bu_semaphore_release(BU_SEM_SYSCALL);
+			if (count != width * pwidth)
+				bu_exit(EXIT_FAILURE, "view_pixel:  fwrite failure\n");
+		}
+		bu_free(scanline[ap->a_y].sl_buf, "sl_buf scanline buffer");
+		scanline[ap->a_y].sl_buf = (unsigned char*)0;
+	}
+}
 
 /**
  * This routine is not used; view_pixel() determines when the last

@@ -87,6 +87,17 @@ extern void view_end(struct application *ap);
  */
 extern void view_cleanup(struct rt_i *rtip);
 
+extern void
+view_pixel_neural(struct application* ap, int generate_dataset);
+
+extern int hit_sphere(const point_t center, fastf_t radius, struct xray* ray, vect_t * intersection1, vect_t * intersection2);
+
+// convert a single point from Cartesian to spherical
+extern void convert_to_sph_point(vect_t point, point_t origin, fastf_t r, point2d_t res);
+
+extern void cert_to_sph_p(fastf_t* para, point_t pt, vect_t dir, fastf_t intersection);
+
+
 #endif  /* RT_RTUIF_H */
 /*
  * Local Variables:
