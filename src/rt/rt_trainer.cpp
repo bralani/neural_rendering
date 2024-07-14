@@ -252,12 +252,12 @@ namespace rt_tool
 		view_init(&APP, (char*)database_name, (char*)object_name, outputfile != (char*)0, framebuffer != (char*)0);
 
 		do_ae(azimuth, elevation);
+		do_prep(rtip);
 		int fb_status = fb_setup();
 		if (fb_status) {
 			fb_log("fail to open fb");
 			return;
 		}
-		do_prep(rtip);
 		char* frame = (char*)malloc(1);
 		frame[0] = 0;
 		view_2init(&APP, frame);

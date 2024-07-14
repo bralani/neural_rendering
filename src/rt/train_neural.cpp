@@ -158,7 +158,7 @@ int main()
 	opts.generate_dataset = true;				// set true if you want to generate the dataset, false if you want to perform a benchmark rendering
 	
 	// options for the dataset generation (useful only if generate_dataset=true)
-	opts.num_samples = 1000;					// number of samples to generate
+	opts.num_samples = 1000000;					// number of samples to generate
 	
 	// options for the rendering (useful only if generate_dataset=false)
 	opts.neural_render = 0;						// set to 1 if you want to perform a neural rendering, 0 if you want to perform a normal rendering	
