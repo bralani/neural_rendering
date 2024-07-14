@@ -97,6 +97,7 @@ extern void convert_to_sph_point(vect_t point, point_t origin, fastf_t r, point2
 
 extern void cert_to_sph_p(fastf_t* para, point_t pt, vect_t dir, fastf_t intersection);
 
+extern fastf_t get_r(void);
 
 #endif  /* RT_RTUIF_H */
 /*

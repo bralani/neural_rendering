@@ -16,19 +16,6 @@
 #include <random>
 #include "./ext.h"
 #include "rt/neu_util.h"
-/***** Variables shared with viewing model *** */
-
-
-struct soltab* kut_soltab = NULL;
-int ambSlow = 0;
-int ambSamples = 0;
-double ambRadius = 0.0;
-double ambOffset = 0.0;
-vect_t ambient_color = { 1, 1, 1 };	/* Ambient white light */
-int ibackground[3] = { 0 };		/* integer 0..255 version */
-int inonbackground[3] = { 0 };		/* integer non-background */
-fastf_t gamma_corr = 0.0;		/* gamma correction if !0 */
-
 
 namespace convert
 {
@@ -40,7 +27,6 @@ namespace convert
 		fastf_t elevation(0.0);
 		fastf_t azimuth(0.0);
 		fastf_t pelevation(0.0);
-		fastf_t pazimuth(0.0);
 		for (auto& data : datas)
 		{
 			fastf_t x = data.first[0] - origin[0];
@@ -48,8 +34,12 @@ namespace convert
 			fastf_t z = data.first[2] - origin[2];
 			elevation = acos(z / r);
 			azimuth = atan2(y , x);
-			if (pow(data.second[0], 2) + pow(data.second[1], 2) + pow(data.second[2], 2) != 1)
-			{
+
+			double sumOfSquares = pow(data.second[0], 2) +
+															pow(data.second[1], 2) +
+															pow(data.second[2], 2);
+
+			if (fabs(sumOfSquares - 1.0) > 1e-9) {
 				fastf_t square_sum = pow(pow(data.second[0], 2) + pow(data.second[1], 2) + pow(data.second[2], 2), 0.5);
 				data.second[0] /= square_sum;
 				data.second[1] /= square_sum;
@@ -113,7 +103,7 @@ namespace util
 		command_file.open("C:\\works\\soc\\rainy\\brlcad\\neu_build\\bin\\script\\" + std::string(db_name) + ".mged");
 		if (command_file.is_open())
 		{
-			for (int i = 1; i < rays.size() + 1; ++i)
+			for (size_t i = 1; i < rays.size() + 1; ++i)
 			{
 				command_file << "in " << std::string(plot_name) << "point" << i << ".s " << "sph " << rays[i - 1].first[0] << " ";
 				command_file << rays[i - 1].first[1] << " ";
@@ -121,7 +111,7 @@ namespace util
 				command_file << "1" << std::endl;
 			}
 			command_file << "r " << std::string(plot_name) << " ";
-			for (int i = 1; i < rays.size() + 1; ++i)
+			for (size_t i = 1; i < rays.size() + 1; ++i)
 			{
 				command_file << "u " << std::string(plot_name) << "point" << i << ".s ";
 			}
@@ -150,7 +140,7 @@ namespace util
 	void write_json(const RayParam& para, const Rayres& res, const char* path)
 	{
 		json js_res = json::array();
-		for (int i = 0; i < para.size(); i++)
+		for (size_t i = 0; i < para.size(); i++)
 		{
 			json single_res = json::object();
 			single_res["point"] = para[i].first;
@@ -166,7 +156,7 @@ namespace util
 	void write_sph_json(const RayParam& para, const std::vector<int>& res, const char* path)
 	{
 		json js_res = json::array();
-		for (int i = 0; i < para.size(); i++)
+		for (size_t i = 0; i < para.size(); i++)
 		{
 			json single_res = json::object();
 			single_res["point_sph"] = para[i].first;
@@ -192,12 +182,11 @@ namespace rt_sample
 	
 	RayParam SampleRandomBoundingSphere(size_t num)
 	{
-		RayParam  res;
-		fastf_t square_sum(0);
+		RayParam res;
 		std::vector<fastf_t> p;
 		std::vector<fastf_t> d;
 
-		for (int i = 0; i < num; ++i)
+		for (size_t i = 0; i < num; ++i)
 		{
 			p.clear();
 			d.clear();
@@ -269,7 +258,9 @@ namespace rt_tool
 			return;
 		}
 		do_prep(rtip);
-		view_2init(&APP, "");
+		char* frame = (char*)malloc(1);
+		frame[0] = 0;
+		view_2init(&APP, frame);
 	}
 	std::vector<int> ShootSamples(const RayParam& ray_list) {
 		std::vector<int> res;

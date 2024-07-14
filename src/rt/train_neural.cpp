@@ -27,7 +27,6 @@
 #include "rt/torch_runner.h"
 #include "bu/getopt.h"
 #include "vmath.h"
-render_type rt_render_type;
 
 struct options
 {
@@ -40,6 +39,7 @@ struct options
 	int neural_render;
 };
 
+/*
 static void
 get_options(int argc, char *argv[], struct options *opts)
 {
@@ -95,7 +95,7 @@ get_options(int argc, char *argv[], struct options *opts)
 		break;
 	    case '?':
 	    case 'h':
-		/* asking for help */
+		// asking for help
 		bu_exit(EXIT_SUCCESS, usage, argv0);
 	    default:
 		bu_exit(EXIT_FAILURE, "ERROR: unknown option -%c\n", *bu_optarg);
@@ -107,16 +107,17 @@ get_options(int argc, char *argv[], struct options *opts)
     db = argv[0];
     obj = argv[1];
 
-    /* final sanity checks */
+    // final sanity checks
     if (!db || !bu_file_exists(db, NULL)) {
-	bu_log(usage);
+	bu_log("%s", usage);
 	bu_exit(EXIT_FAILURE, "ERROR: database %s not found\n", (db)?db:"[]");
     }
     if (!obj) {
-	bu_log(usage);
+	bu_log("%s", usage);
 	bu_exit(EXIT_FAILURE, "ERROR: object(s) not specified\n");
     }
 }
+*/
 
 
 void generate_renders_test_set(int num_renders)
@@ -129,7 +130,6 @@ void generate_renders_test_set(int num_renders)
 
 	// test set
 	set_generate_test_set(1);
-	rt_neu::render();
 	for (int i = 0; i < num_renders; i++)
 	{
 		do_ae(rt_sample::RandomNum(-180, 180), rt_sample::RandomNum(-30, 30));
@@ -139,19 +139,20 @@ void generate_renders_test_set(int num_renders)
 }
 
 
-int main(int argc, char* argv[])
+//int main(int argc, char* argv[])
+int main()
 {
 	
-    char *db = NULL;
-    char *ob = NULL;
+	const char *db = NULL;
+  const char *ob = NULL;
 
 	struct options opts;
-	db = "C:\\Users\\m.balice\\Desktop\\rt_volume\\build\\Debug\\share\\db\\moss.g";	// path to the database
+	db = "/Users/matteobalice/Desktop/rt_volume/build/share/db/moss.g";	// path to the database
 	ob = "all.g";								// name of the object to render
 	opts.generate_dataset = true;				// set true if you want to generate the dataset, false if you want to perform a benchmark rendering
 	
 	// options for the dataset generation (useful only if generate_dataset=true)
-	opts.num_samples = 1000000;					// number of samples to generate
+	opts.num_samples = 1000;					// number of samples to generate
 	
 	// options for the rendering (useful only if generate_dataset=false)
 	opts.neural_render = 0;						// set to 1 if you want to perform a neural rendering, 0 if you want to perform a normal rendering	

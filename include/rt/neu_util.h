@@ -38,8 +38,8 @@ extern "C"
 	extern fastf_t	rt_perp_tol;		/* Value for rti_tol.perp */
 	/***** variables from neural.c *****/
 	extern int view_init(struct application* ap, char* file, char* obj, int minus_o, int minus_F);
-	extern int ao_raymiss(register struct application* ap);
-	extern int ao_rayhit(register struct application* ap,
+	extern int ao_raymiss(struct application* ap);
+	extern int ao_rayhit(struct application* ap,
 		struct partition* PartHeadp,
 		struct seg* UNUSED(segp));
 	extern void
@@ -65,10 +65,10 @@ extern "C"
 		view_2init(struct application* ap, char* UNUSED(framename));
 	extern void set_size(int size);
 	extern void get_center(point_t center);
-	extern fastf_t get_r();
 	extern void set_type(render_type type);
 	extern void set_generate_test_set(int generate);
 	extern int hit_sphere(const point_t center, fastf_t radius, struct xray* ray, vect_t * intersection1, vect_t * intersection2);
+	extern fastf_t get_r(void);
 }
 
 const std::string global_model_path;
