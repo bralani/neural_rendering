@@ -67,14 +67,20 @@ class RayDataset(Dataset):
 
     def get_embeddings(self):
         embeddings = []
-        # cycle all data where label = 1
-        for (origin, dir, label) in self.data:
-            if label == 1:
-                embeddings.append(torch.cat([origin, dir]))
+        # get indices where label is 1
+        #indices = [i for i, (_, _, label) in enumerate(self.data) if label == 1]
+        indices = [i for i in range(len(self.data))]
+        # randomly sample 5000 indices where label is 1
+        indices = np.random.choice(indices, 1000, replace=False)
+        labels = []
+        for i in indices:
+            embeddings.append(torch.cat([self.data[i][0], self.data[i][1]]))
+            labels.append(self.data[i][2])
 
         embeddings = torch.stack(embeddings)
+        labels = torch.stack(labels)
 
-        return embeddings
+        return embeddings, labels
 
     def __len__(self):
         return len(self.data)
@@ -91,47 +97,71 @@ class Encoder(nn.Module):
         self.embeddings = embeddings
 
         num_embeddings = embeddings.shape[0]
-        dim = 2
         init_range = (0.1, 0.1)
 
 
-        # parameters (sigma_x, sigma_y)
-        self.embeddings_parameters = nn.Parameter(
-            torch.empty(num_embeddings, dim).uniform_(init_range[0], init_range[1]),
+        dim = 4
+        
+        self.cholesky_decomposition = nn.Parameter(
+            torch.empty(num_embeddings, dim, dim).uniform_(*init_range),
             requires_grad=True
         )
 
+        # Ensure that the cholesky decomposition is lower triangular
+        self.cholesky_decomposition = nn.Parameter(torch.tril(self.cholesky_decomposition.data), requires_grad=True)
+        self.eye_matrix = torch.eye(self.cholesky_decomposition.data.size(-1)).unsqueeze(0).expand_as(self.cholesky_decomposition.data)
+
+        '''
         self.proxy_variable = nn.Parameter(
             torch.empty(num_embeddings, 1).uniform_(0.4, 0.8),
-            requires_grad=True)
+            requires_grad=True)'''
+        
+    def update_cholesky(self):
+        with torch.no_grad():
+            L = torch.tril(self.cholesky_decomposition.data)
+            epsilon = 1e-3
+            # ensure spd
+            for i in range(L.shape[0]):
+                for j in range(4):
+                    if L[i][j][j] <= 0:
+                        L[i][j][j] = epsilon
+                determinant = torch.det(L[i])
+                if determinant <= 1e-5:
+                    for j in range(4):
+                        L[i][j][j] += epsilon
 
+            self.cholesky_decomposition.data = L
 
             
         
     def concatenate_embeddings_parameters(self):
 
-        proxy_variables_sigmoid = torch.sigmoid(self.proxy_variable)
-        proxy_variables_binary = (proxy_variables_sigmoid > 0.5)
-        indices = torch.where(proxy_variables_binary == 1)[0]
+        #proxy_variables_sigmoid = torch.sigmoid(self.proxy_variable)
+        #proxy_variables_binary = (proxy_variables_sigmoid > 0.5)
+        #indices = torch.where(proxy_variables_binary == 1)[0]
 
 
         # take only the embeddings_parameters with proxy_variables_binary = 1
-        embeddings_parameters = self.embeddings_parameters[indices]
-        embeddings = self.embeddings[indices]
+        #embeddings_parameters = self.embeddings_parameters[indices]
+        #embeddings = self.embeddings[indices]
 
-        return torch.cat([embeddings, embeddings_parameters], dim=1), proxy_variables_sigmoid
+        covariance_matrices = torch.matmul(self.cholesky_decomposition, self.cholesky_decomposition.permute(0, 2, 1))
+
+        return self.embeddings, covariance_matrices
 
 
     def forward(self, x):
-        embeddings_parameters, proxy = self.concatenate_embeddings_parameters()
-        return embeddings_parameters, proxy
+        embeddings_parameters, covariance_matrices = self.concatenate_embeddings_parameters()
+        return embeddings_parameters, covariance_matrices
 
 
 
 class Decoder(nn.Module):
-    def __init__(self):
+    def __init__(self, labels_embedding):
         super(Decoder, self).__init__()
         self.sigmoid = nn.Sigmoid()
+        self.labels_embedding = labels_embedding
+        self.labels_embedding[self.labels_embedding == 0] = -1
 
 
     def log_prob_2d(self, x, mu, Sigma_diag):
@@ -170,135 +200,158 @@ class Decoder(nn.Module):
         con media mu e matrice di covarianza Sigma per più gaussiane.
 
         Parametri:
-        mu (torch.Tensor): Tensor di media (dim = [N, d]).
-        Sigma (torch.Tensor): Tensor di matrice di covarianza (dim = [N, d, d]).
+        mu (torch.Tensor): Tensor di media (dim = [M, 4]).
+        Sigma (torch.Tensor): Tensor di matrice di covarianza (dim = [N, 4, 4]).
 
         Restituisce:
-        torch.Tensor: Valori massimi della pdf per ciascuna gaussiana (dim = [N]).
+        torch.Tensor: Valori massimi della pdf per ciascuna gaussiana (dim = [M]).
         """
-        N, d = mu.shape
-        
-        # Calcola il determinante della matrice di covarianza
-        det_Sigma = torch.prod(Sigma, dim=1)
-        
-        # Calcola il fattore di normalizzazione per ogni gaussiana
-        normalization_factor = (2 * torch.pi) ** (d / 2) * torch.sqrt(det_Sigma)
-        
-        # Calcola il valore massimo della pdf per ogni gaussiana
-        pdf_max_values = 1 / normalization_factor
-        
+        M, D = mu.shape
+
+        pdf_max_values = torch.zeros(M, device=mu.device)
+
+        for m in range(M):
+            mu_m = mu[m]
+            Sigma_m = Sigma[m]
+            Sigma_inv = torch.inverse(Sigma_m)
+            det_Sigma = torch.det(Sigma_m)
+            norm_const = (2 * torch.pi) ** (D / 2) * torch.sqrt(det_Sigma)
+            
+            diff = torch.zeros(1, D, device=mu.device)
+            exponent = -0.5 * torch.sum(diff @ Sigma_inv * diff, dim=1)
+            
+            pdf_max_values[m] = torch.exp(exponent) / norm_const
+
         return pdf_max_values
 
-    def pdf_2d(self,x, mu, Sigma_diag):
+    def pdf_2d(self,x, mu, Sigma):
         """
         Calcola la funzione di densità di probabilità (pdf) di una distribuzione normale multivariata
-        con matrice di covarianza diagonale in 2D usando PyTorch.
+        con matrice di covarianza diagonale usando PyTorch.
 
         Parametri:
-        x (torch.Tensor): Tensore di variabili (dim = [N, 2]).
-        mu (torch.Tensor): Tensore di media della distribuzione (dim = [N, M, 2]).
-        Sigma_diag (torch.Tensor): Tensore delle varianze della distribuzione (dim = [N, M, 2]).
+        x (torch.Tensor): Tensore di variabili (dim = [N, 4]).
+        mu (torch.Tensor): Tensore di media della distribuzione (dim = [M, 4]).
+        Sigma (torch.Tensor): Tensore delle varianze della distribuzione (dim = [M, 4, 4]).
 
         Restituisce:
         torch.Tensor: PDF per ogni punto e gaussiana (dim = [N, M]).
         """
+            
         N, D = x.shape
-        _, M, _ = mu.shape
+        M, _, _ = Sigma.shape
 
-        # Espandi x per fare broadcasting
-        x = x.unsqueeze(1).expand(-1, M, -1)  # [N, M, 2]
+        # Inizializza il risultato
+        pdf_values = torch.zeros(N, M, device=x.device)
 
-        # Calcola il termine della densità
-        det_Sigma = torch.prod(Sigma_diag, dim=-1)  # Determinante della matrice di covarianza [N, M]
-        diff = x - mu  # [N, M, 2]
-        exponent = -0.5 * torch.sum((diff ** 2) / Sigma_diag, dim=-1)  # [N, M]
+        # Calcola le pdf
+        for m in range(M):
+            mu_m = mu[m]
+            Sigma_m = Sigma[m]
+            Sigma_inv = torch.inverse(Sigma_m)
+            det_Sigma = torch.det(Sigma_m)
+            norm_const = (2 * torch.pi) ** (D / 2) * torch.sqrt(det_Sigma)
+            
+            diff = x - mu_m
+            exponent = -0.5 * torch.sum(diff @ Sigma_inv * diff, dim=1)
+            
+            pdf_values[:, m] = self.labels_embedding[m] * torch.exp(exponent) / norm_const
 
-        # Calcola la pdf
-        normalization_factor = (2 * torch.pi) ** (D / 2) * torch.sqrt(det_Sigma)  # [N, M]
-        pdf = torch.exp(exponent) / normalization_factor  # [N, M]
+            if(torch.isnan(pdf_values).any()):
+                print("nan")
+        
+        return pdf_values
 
-        return pdf
+        return pdfs
 
 
-    def apply_gaussian_splatting(self, origins, directions, latents):
+    def apply_gaussian_splatting(self, origins, directions, means, covariances):
         
         # Crea un tensore delle coordinate degli origins
         pos = torch.cat([origins, directions], dim=1)  # (batch_size, 4)
-        
+        '''
         mean_x = latents[:, 0]
         mean_y = latents[:, 1]
         mean_dir_x = latents[:, 2]
         mean_dir_y = latents[:, 3]
-        sigma_x = torch.relu(latents[:, 4]) + 0.01
-        sigma_y = torch.relu(latents[:, 5]) + 0.01
+        sigma_x = torch.relu(latents[:, 4]) + 0.001
+        sigma_y = torch.relu(latents[:, 5]) + 0.001
         sigma_dir_x = torch.full((latents.shape[0],), 0.001)
-        sigma_dir_y = torch.full((latents.shape[0],), 0.001)
+        sigma_dir_y = torch.full((latents.shape[0],), 0.001)'''
 
         # Espandi i means e le sigmas per il broadcasting such that they have the same shape as pos
-        means = torch.stack([mean_x, mean_y, mean_dir_x, mean_dir_y], dim=-1).reshape(-1, 4)  # (num_gaussians, 4)
-        sigmas = torch.stack([sigma_x, sigma_y, sigma_dir_x, sigma_dir_y], dim=-1).reshape(-1, 4)  # (num_gaussians, 4)
+        #means = torch.stack([mean_x, mean_y, mean_dir_x, mean_dir_y], dim=-1).reshape(-1, 4)  # (num_gaussians, 4)
+        #sigmas = torch.stack([sigma_x, sigma_y, sigma_dir_x, sigma_dir_y], dim=-1).reshape(-1, 4)  # (num_gaussians, 4)
 
-        pdf_max_values = self.pdf_max(means, sigmas)
+        pdf_max_values = self.pdf_max(means, covariances)
 
-        means = means.unsqueeze(0).expand(pos.shape[0], -1, -1)  # (batch_size, num_gaussians, 4)
-        sigmas = sigmas.unsqueeze(0).expand(pos.shape[0], -1, -1)  # (batch_size, num_gaussians, 4)
+        #means = means.unsqueeze(0).expand(pos.shape[0], -1, -1)  # (batch_size, num_gaussians, 4)
+        #sigmas = sigmas.unsqueeze(0).expand(pos.shape[0], -1, -1)  # (batch_size, num_gaussians, 4)
 
         # Calcola le probabilità logaritmiche per tutte le gaussiane
-        gaussian_values = self.pdf_2d(pos, means, sigmas) / pdf_max_values
+        gaussian_values = self.pdf_2d(pos, means, covariances) / pdf_max_values
+
+        if(torch.isnan(gaussian_values).any()):
+            print("nan")
 
         prob = torch.sum(gaussian_values, dim=1)
-        prob = torch.clamp(prob, 0, 1)
+        prob = torch.sigmoid(prob)
+
 
         return prob
 
 
-    def forward(self, origins, directions, latents):
-        output = self.apply_gaussian_splatting(origins, directions, latents).reshape(-1, 1)
+    def forward(self, origins, directions, means, covariances):
+        output = self.apply_gaussian_splatting(origins, directions, means, covariances).reshape(-1, 1)
 
         return output
 
 
 
 class Autoencoder(nn.Module):
-    def __init__(self, embeddings):
+    def __init__(self, embeddings, labels_embedding):
         super(Autoencoder, self).__init__()
         self.encoder = Encoder(embeddings)
-        self.decoder = Decoder()
+        self.decoder = Decoder(labels_embedding)
 
     def forward(self, origins, directions):
-        latents, proxy = self.encoder(origins)
-        output = self.decoder(origins, directions, latents)
-        return output, proxy
+        origins = origins
+        directions = directions
+
+        mean, covariance = self.encoder(origins)
+        output = self.decoder(origins, directions, mean, covariance)
+        return output
 
     
-def loss_function(predict, original_hits, proxy):
+def loss_function(predict, original_hits):
 
-    num_positive_samples = torch.sum(original_hits)
-    num_negative_samples = original_hits.shape[0] - num_positive_samples
+    #num_positive_samples = torch.sum(original_hits)
+    #num_negative_samples = original_hits.shape[0] - num_positive_samples
 
-    weight_positive = num_negative_samples / (num_positive_samples + num_negative_samples)
+    #weight_positive = num_negative_samples / (num_positive_samples + num_negative_samples)
 
     # Calcola la perdita BCE pesata
-    loss = nn.BCELoss(weight=torch.tensor([weight_positive]))(predict, original_hits)
+    #loss = nn.BCELoss(weight=torch.tensor([weight_positive]))(predict, original_hits)
+    loss = nn.BCELoss()(predict, original_hits)
 
 
     # Calcola la BCE Loss come usuale
-    bce_loss = nn.BCELoss(weight=torch.tensor([weight_positive]))(predict, original_hits)
+    #bce_loss = nn.BCELoss(weight=torch.tensor([weight_positive]))(predict, original_hits)
     
     # Penalizzazione delle previsioni di valori vicini a target_negative per le classi negative
-    negative_mask = (original_hits == 0).float()
+    #negative_mask = (original_hits == 0).float()
     
     # Penalizzazione per valori delle classi negative vicini a 0.4999
-    target_neg_loss = negative_mask * torch.abs(predict - 0.4999)
+    #target_neg_loss = negative_mask * torch.abs(predict - 0.4999)
     
     # Calcola la perdita totale
-    loss = bce_loss + target_neg_loss.mean()
+    #loss = bce_loss #+ target_neg_loss.mean()
 
     #loss = nn.BCELoss()(predict, original_hits)
 
     #proxy_binary = (proxy > 0.5).float()
 
-    
+    '''
     threshold = 0.8
     proxy_mean = torch.mean(proxy)
 
@@ -306,10 +359,10 @@ def loss_function(predict, original_hits, proxy):
     proxy_variance = torch.var(proxy)
 
     loss2 = torch.abs(proxy_mean - threshold) + torch.abs(proxy_variance - proxy_var_max)
-
+    '''
 
     # Combinare le perdite
-    loss = loss + loss2
+    loss = loss #+ loss2
     return loss
     
 
@@ -328,7 +381,7 @@ def test_model(model, data_loader, device):
             hits = hits.reshape(-1, 1)
 
             # Previsione
-            reconstructed_hits, _ = model(origins, directions)
+            reconstructed_hits = model(origins, directions)
             
             # Converti le previsioni e i valori reali in numpy arrays per la valutazione
             predictions = (reconstructed_hits > 0.5).float().cpu().numpy().flatten()  # Converti probabilità in classi
@@ -348,11 +401,11 @@ import torch.optim as optim
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 
 # Hyperparameters
-learning_rate = 0.001
+learning_rate = 0.005
 
 # Initialize model, optimizer, and loss function
-embeddings = ray_dataset.get_embeddings()
-model = Autoencoder(embeddings)
+embeddings, labels_embedding = ray_dataset.get_embeddings()
+model = Autoencoder(embeddings, labels_embedding)
 optimizer = optim.NAdam(model.parameters(), lr=learning_rate)
 model.to(device)
 
@@ -374,12 +427,13 @@ for epoch in range(num_epochs):
         hits = hits.reshape(-1, 1)
 
         optimizer.zero_grad()
-        reconstructed_hits, proxy = model(origins, directions)
+        reconstructed_hits = model(origins, directions)
 
-        embeddings = model.encoder.embeddings_parameters
-        loss = loss_function(reconstructed_hits, hits, proxy)
+        #embeddings = model.encoder.embeddings_parameters
+        loss = loss_function(reconstructed_hits, hits)
         loss.backward()
         optimizer.step()
+        model.encoder.update_cholesky()
         total_loss += loss.item()
     
 
@@ -388,7 +442,7 @@ for epoch in range(num_epochs):
     print(f'Epoch [{epoch+1}/{num_epochs}], Loss: {total_loss:.4f}')
     #if epoch % 20 == 0:
     model.eval()
-    all_labels, all_predictions = test_model(model, ray_data_loader, device)
+    all_labels, all_predictions = test_model(model, test_data_loader, device)
 
     # Calcola e stampa le metriche di prestazione
     accuracy = accuracy_score(all_labels, all_predictions)
