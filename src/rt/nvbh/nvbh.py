@@ -9,12 +9,13 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 n_points = 200
 
 def convert_spherical_to_cartesian(theta, phi):
-    
-    x = torch.sin(theta) * torch.cos(phi)
-    y = torch.sin(theta) * torch.sin(phi)
+    sin_theta = torch.sin(theta)
+
+    x = sin_theta * torch.cos(phi)
+    y = sin_theta * torch.sin(phi)
     z = torch.cos(theta)
     
-    return torch.stack((x, y, z), dim=-1)
+    return torch.cat((x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)), dim=-1)
 
 t_values = torch.linspace(0, 1, n_points).reshape(1, n_points, 1).to(device)
 def sample_points_along_ray(int1, int2):
@@ -22,15 +23,10 @@ def sample_points_along_ray(int1, int2):
     point1 = convert_spherical_to_cartesian(int1[:, 0], int1[:, 1])
     point2 = convert_spherical_to_cartesian(int2[:, 0], int2[:, 1])
     
-    N = point1.size(0)
-    diff = (point2 - point1)
-    point1 = point1.reshape(N, 1, 3)
-    diff = diff.reshape(N, 1, 3)
-
-    # (N, n_points, 3)
-    points = point1 + diff * t_values
+    diff = point2 - point1
+    points = point1.unsqueeze(1) + diff.unsqueeze(1) * t_values
     
-    return points.reshape(N, n_points, 3)
+    return points
 
 
 class RenderDatasetSph(Dataset):
@@ -61,33 +57,25 @@ class NeuralNetwork(nn.Module):
         super().__init__()
         
         # multi-resolution hash grid
-        self.encoder = GridEncoder(input_dim=3, num_levels=4, level_dim=8, base_resolution=32)
+        num_levels = 4
+        level_dim = 1
+        base_resolution = 16
+        self.encoder = GridEncoder(input_dim=3, num_levels=num_levels, level_dim=level_dim, base_resolution=base_resolution)
 
         
         # very simple model -> just a linear layer to map the output of the encoder to a single probability value
         self.model = nn.Sequential(
-            nn.Linear(4 * 8, 1),
+            nn.Linear(num_levels * level_dim, 1),
             nn.Sigmoid()
         )
 
     def forward(self, x):
 
-        num_shape = x.size(0)
-
-        # sampling n_points along the ray
         with torch.no_grad():
-            points = sample_points_along_ray(x[:, :2], x[:, 2:4])
+            output = sample_points_along_ray(x[:, :2], x[:, 2:4])
+        output, _ = torch.max(self.model(self.encoder(output)), dim=1)
 
-        # encode the points
-        t = self.encoder(points).reshape(num_shape * n_points, -1)
-
-        # get the probability for each point
-        h = self.model(t).reshape(num_shape, n_points)
-
-        # get the maximum probability along the ray points
-        h = torch.max(h, dim=1)[0].view(-1, 1)
-
-        return h
+        return output
 
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -109,7 +97,7 @@ def train():
 
     # Load the dataset
     dataset = RenderDatasetSph(data_dir="c:/Users/miche/Downloads/train_neural_26M.txt")
-    dataset_loader = DataLoader(dataset,batch_size=4096,shuffle=True)
+    dataset_loader = DataLoader(dataset,batch_size=2**13,shuffle=True)
 
     # Load the dataset datas/test.txt with open
     file_path = 'c:/Users/miche/Downloads/test_neural.txt'
