@@ -187,7 +187,7 @@ def train():
     total_step = len(dataset_loader)
 
     add_time_total = 0
-    for epoch in range(1):
+    for epoch in range(5):
         epoch_train_loss = 0
 
         add_time = 0
@@ -246,6 +246,6 @@ def train():
         print(f"Precision: {precision}")
         print(f"Recall: {recall}")
     
-        show_camera(model)
+    show_camera(model)
     
 train()
