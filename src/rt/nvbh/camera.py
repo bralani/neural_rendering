@@ -7,7 +7,7 @@ camera_pos = np.array([10, 0, 0], dtype=float)
 camera_dir = np.array([-0.74240387650610384, -0.51983679072568478, -0.42261826174069972])
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-def show_camera(model):
+def show_camera(model, model2):
     pygame.init()
     height, width = 256, 256
     screen_height, screen_width = 512, 512
@@ -74,7 +74,10 @@ def show_camera(model):
             rgb_values = np.zeros((ray_origins.shape[0], 3))
             input = torch.cat([point1_sph, point2_sph], axis=-1)
             if len(input) > 0:
-                output_label, output_rgb = model(input)
+                with torch.no_grad():
+                    output_label, _, indices_first = model(input)
+                    output_rgb = model2(input, indices_first)
+
                 output_label[output_label > 0.5] = 1
                 output_label[output_label <= 0.5] = 0
                 output = (output_label * output_rgb) * 255
