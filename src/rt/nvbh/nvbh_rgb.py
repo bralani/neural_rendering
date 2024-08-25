@@ -45,8 +45,11 @@ def sample_points_along_ray(int1, int2):
     diff = point2 - point1
     points = point1.unsqueeze(1) + diff.unsqueeze(1) * t_values
     
-    return points
+    norm = torch.norm(diff, dim=-1).unsqueeze(-1)
+    norm = torch.clamp(norm, 1e-6, 1e6)
+    directions = diff / norm
 
+    return points, directions
 
 
 class RenderDatasetSph(Dataset):
@@ -85,13 +88,28 @@ class NeuralNetwork(nn.Module):
         super().__init__()
         
         self.level_dim = 1
-        self.num_levels = 5
+        self.num_levels = 6
         base_resolution = 8
         self.encoder_label = GridEncoder(input_dim=3, num_levels=self.num_levels, level_dim=self.level_dim, base_resolution=base_resolution)
 
         self.model_label = nn.Sequential(
             nn.Linear(self.num_levels, 1),
             nn.Sigmoid()
+        )
+
+        self.level_dim2 = 4
+        self.num_levels2 = 5
+        base_resolution2 = 4
+        self.encoder_rgb = GridEncoder(input_dim=3, num_levels=self.num_levels2, level_dim=self.level_dim2, base_resolution=base_resolution2)
+
+        self.model_rgb = nn.Sequential(
+            nn.Linear(3 + self.num_levels2 * (self.level_dim2), 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 64),
+            nn.ReLU(),
+            nn.Linear(64, 3),
         )
 
     def predict(self, x):
@@ -102,63 +120,35 @@ class NeuralNetwork(nn.Module):
 
         num_points = x.size(0)
         with torch.no_grad():
-            points_encoded = sample_points_along_ray(x[:, :2], x[:, 2:4])
+            points_encoded, directions = sample_points_along_ray(x[:, :2], x[:, 2:4])
 
         output = self.encoder_label(points_encoded).reshape(num_points, int(n_points), -1)
         output = self.model_label(output)
         output_hits, _ = torch.max(output, dim=1)
 
         # get the first voxel hitted
-        all_labels = (output > 0.5).float()
-        indices_first = torch.argmax(all_labels, dim=1).view(-1)
-
-        return output_hits, output, indices_first
-    
-
-class NeuralNetwork2(nn.Module):
-    def __init__(self):
-        super().__init__()
-        
-        self.level_dim2 = 4
-        self.num_levels2 = 6
-        base_resolution2 = 4
-        self.encoder_rgb = GridEncoder(input_dim=3, num_levels=self.num_levels2, level_dim=self.level_dim2, base_resolution=base_resolution2)
-
-        self.model_rgb = nn.Sequential(
-            nn.Linear(self.num_levels2 * (self.level_dim2) * 5, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 64),
-            nn.ReLU(),
-            nn.Linear(64, 3),
-        )
-    
-    def forward(self, x, indices_first):
-
-        num_points = torch.arange(x.size(0))
-        with torch.no_grad():
-            points_encoded = sample_points_along_ray(x[:, :2], x[:, 2:4])
-
-        # get the first voxel hitted
         points_encoded = self.encoder_rgb(points_encoded)
 
-        indices_prev1 = torch.clamp(indices_first - 2, 0, 299)
-        indices_prev2 = torch.clamp(indices_first - 1, 0, 299)
-        indices_next1 = torch.clamp(indices_first + 1, 0, 299)
-        indices_next2 = torch.clamp(indices_first + 2, 0, 299)
+        with torch.no_grad():
+            # get the first voxel hitted
+            all_labels = (output > 0.5).float()
+            indices_first = torch.argmax(all_labels, dim=1).view(-1)
+            indices_first = torch.clamp(indices_first, 2, n_points - 3)
 
-        points_encoded_first = torch.cat([
-                                            points_encoded[num_points, indices_prev1],
-                                            points_encoded[num_points, indices_prev2],
-                                            points_encoded[num_points, indices_first], 
-                                            points_encoded[num_points, indices_next1],
-                                            points_encoded[num_points, indices_next2]
-                                        ], dim=-1)
+            indices_prev1 = torch.clamp(indices_first - 1, 1, n_points - 4)
+            indices_next1 = torch.clamp(indices_first + 1, 3, n_points - 2)
 
-        output_rgb = self.model_rgb(points_encoded_first)
+            num_points2 = torch.arange(num_points)
 
-        return output_rgb
+        points_encoded = torch.stack([points_encoded[num_points2, indices_prev1], points_encoded[num_points2, indices_first], points_encoded[num_points2, indices_next1]], dim=1)
+        points_encoded = torch.sum(points_encoded, dim=1)
+        
+        # add x to points_encoded
+        points_encoded = torch.cat([directions, points_encoded], dim=-1)
+
+        output_rgb = self.model_rgb(points_encoded)
+
+        return output_hits, output, indices_first, output_rgb
     
 from torch.utils.data import DataLoader
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
@@ -188,7 +178,7 @@ def find_index_with_exponential_decay(tensor):
     
     return weighted_index
 
-def loss_fn(output_label, labels, dist, all_outputs):
+def loss_fn(output_label, labels, dist, all_outputs, output_rgb, rgb):
 
     mask = (labels > 0.5).squeeze()
 
@@ -198,15 +188,9 @@ def loss_fn(output_label, labels, dist, all_outputs):
     # L1 Loss tra gli indici soft e dist
     loss1 = nn.L1Loss()(indices_first[mask], dist[mask])
     loss0 = nn.BCELoss()(output_label, labels)
-
-    return loss0 + loss1
-
-
-def loss_fn2(output_rgb, rgb):
-
     loss2 = nn.MSELoss()(output_rgb, rgb)
 
-    return loss2
+    return loss0 + loss1 + loss2
 
 
 def get_memory_usage():
@@ -224,7 +208,6 @@ def train():
     # Controlla lo stato della memoria iniziale
     print(f"Memory usage: {get_memory_usage()}")
     model = NeuralNetwork().to(device)
-    model2 = NeuralNetwork2().to(device)
     print(f"Memory usage: {get_memory_usage()}")
 
 
@@ -257,7 +240,6 @@ def train():
     test_set_dist = torch.stack(test_set_dist).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    optimizer2 = torch.optim.Adam(model2.parameters(), lr=0.01)
     #scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
 
@@ -284,10 +266,10 @@ def train():
             optimizer.zero_grad()
 
             now = time.time()
-            output_label, all_outputs, _ = model(para, dist)
+            output_label, all_outputs, _, output_rgb = model(para)
             add_time += time.time() - now
 
-            loss1 = loss_fn(output_label, labels, dist, all_outputs)
+            loss1 = loss_fn(output_label, labels, dist, all_outputs, output_rgb, rgb)
             loss1.backward()
             optimizer.step()
 
@@ -304,20 +286,25 @@ def train():
 
         all_preds = []
         all_preds_dist = []
+        all_preds_rgb = []
         with torch.no_grad():
             for i in range(0, len(test_set), 4096):
-                output, _, dist = model(test_set[i:i+4096], test_set_dist[i:i+4096])
+                output, _, dist, output_rgb = model(test_set[i:i+4096], test_set_dist[i:i+4096])
                 all_preds.append(output)
+                all_preds_rgb.append(output_rgb)
                 all_preds_dist.append((dist / n_points).view(-1, 1))
 
         all_preds = torch.cat(all_preds, dim=0)
         all_preds_dist = torch.cat(all_preds_dist, dim=0)
+        all_preds_rgb = torch.cat(all_preds_rgb, dim=0)
 
         #remove the preds_rgb that have not been hit
         mask = (all_preds > 0.5).squeeze()
         
         all_preds_dist = all_preds_dist[mask]
         all_dist_true = test_set_dist[mask]
+        all_preds_rgb = all_preds_rgb[mask]
+        all_rgb_true = test_set_rgb[mask]
 
 
         
@@ -329,76 +316,14 @@ def train():
 
         f1 = f1_score(all_labels, all_preds)
         dist_loss = nn.L1Loss()(all_preds_dist, all_dist_true).item()
+        rgb_loss = nn.L1Loss()(all_preds_rgb, all_rgb_true).item()
 
 
         print("MODEL 1")
         print(f"F1: {f1}")
         print(f"Dist L1: {dist_loss}")
-
-
-    for epoch in range(10):
-        epoch_train_loss = 0
-
-        add_time = 0
-        
-        for i, lines in enumerate(dataset_loader):
-           
-            lines = "\n".join(lines)
-            data = np.fromstring(lines, sep=' ').reshape(-1, 9)
-
-            para = torch.tensor(data[:, :4], device=device, dtype=torch.float32)
-            labels = torch.tensor(data[:, 4], device=device, dtype=torch.float32).view(-1, 1)
-            rgb = torch.tensor(data[:, 5:8], device=device, dtype=torch.float32) / 255
-            dist = torch.tensor(data[:, -1], device=device, dtype=torch.float32).view(-1, 1)
-
-            optimizer2.zero_grad()
-
-            with torch.no_grad():
-                output, _, indices_first = model(para, dist)
-                mask = (output > 0.5).squeeze()
-
-            output_rgb = model2(para[mask], indices_first[mask])
-
-            loss1 = loss_fn2(output_rgb, rgb[mask])
-            loss1.backward()
-            optimizer2.step()
-
-            epoch_train_loss += loss1.item()
-
-            if i % 100 == 0:
-                print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
-                            .format(epoch+1, 100, i+1, total_step, loss1.item()))
-                
-        add_time_total += add_time
-        print(f"Add time: {add_time}")
-
-        model.eval()
-
-        all_preds = []
-        all_preds_rgb = []
-        all_preds_dist = []
-        with torch.no_grad():
-            for i in range(0, len(test_set), 4096):
-                output, _, indices_first = model(test_set[i:i+4096], test_set_dist[i:i+4096])
-                output_rgb = model2(test_set[i:i+4096], indices_first)
-                all_preds.append(output)
-                all_preds_rgb.append(output_rgb)
-
-        all_preds = torch.cat(all_preds, dim=0)
-        all_preds_rgb = torch.cat(all_preds_rgb, dim=0)
-
-        #remove the preds_rgb that have not been hit
-        mask = (all_preds > 0.5).squeeze()
-        all_preds_rgb = all_preds_rgb[mask]
-        all_rgb_true = test_set_rgb[mask]
-
-
-        rgb_loss = nn.L1Loss()(all_preds_rgb, all_rgb_true).item()
-
-
-        print("MODEL 2")
         print(f"RGB L1: {rgb_loss}")
     
-    show_camera(model, model2)
+    show_camera(model)
     
 train()
