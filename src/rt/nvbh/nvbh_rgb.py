@@ -126,6 +126,7 @@ class NeuralNetwork(nn.Module):
         output = self.model_label(output)
         output_hits, _ = torch.max(output, dim=1)
 
+        
         # get the first voxel hitted
         points_encoded = self.encoder_rgb(points_encoded)
 
@@ -135,16 +136,12 @@ class NeuralNetwork(nn.Module):
             indices_first = torch.argmax(all_labels, dim=1).view(-1)
             indices_first = torch.clamp(indices_first, 2, n_points - 3)
 
-            indices_prev1 = torch.clamp(indices_first - 1, 1, n_points - 4)
-            indices_next1 = torch.clamp(indices_first + 1, 3, n_points - 2)
-
             num_points2 = torch.arange(num_points)
+        points_encoded = points_encoded[num_points2, indices_first]
 
-        points_encoded = torch.stack([points_encoded[num_points2, indices_prev1], points_encoded[num_points2, indices_first], points_encoded[num_points2, indices_next1]], dim=1)
-        points_encoded = torch.sum(points_encoded, dim=1)
         
         # add x to points_encoded
-        points_encoded = torch.cat([directions, points_encoded], dim=-1)
+        points_encoded = torch.cat([self.pos_encoder(directions), points_encoded], dim=-1)
 
         output_rgb = self.model_rgb(points_encoded)
 
