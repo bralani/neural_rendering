@@ -141,7 +141,7 @@ class NeuralNetwork(nn.Module):
 
         
         # add x to points_encoded
-        points_encoded = torch.cat([self.pos_encoder(directions), points_encoded], dim=-1)
+        points_encoded = torch.cat([directions, points_encoded], dim=-1)
 
         output_rgb = self.model_rgb(points_encoded)
 
