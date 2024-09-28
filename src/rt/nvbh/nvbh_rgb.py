@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from matplotlib import pyplot as plt
 import psutil
 import torch
 import torch.nn as nn
@@ -9,11 +10,15 @@ from gridencoder import GridEncoder
 from torch.utils.data import Dataset
 import numpy as np
 import tracemalloc
+import pygame, time
 import numpy as np
+from pygame.locals import *
 import torch
-import torch.nn.functional as F
-import torch.optim.lr_scheduler as lr_scheduler
 from camera import show_camera
+from torch.utils.data import DataLoader
+from sklearn.metrics import f1_score
+import torch.nn as nn
+import numpy as np
 
 
 # Avvia il monitoraggio dell'allocazione della memoria
@@ -23,9 +28,6 @@ tracemalloc.start()
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 n_points = 200
-# Gestione della camera e del rendering
-range_size = 0.2
-
 
 def convert_spherical_to_cartesian(theta, phi):
     sin_theta = torch.sin(theta)
@@ -37,17 +39,12 @@ def convert_spherical_to_cartesian(theta, phi):
     return torch.cat((x.unsqueeze(-1), y.unsqueeze(-1), z.unsqueeze(-1)), dim=-1)
 
 t_values = torch.linspace(0, 1, n_points).reshape(1, n_points, 1).to(device)
-def sample_points_along_ray(int1, int2):
-
-    point1 = convert_spherical_to_cartesian(int1[:, 0], int1[:, 1])
-    point2 = convert_spherical_to_cartesian(int2[:, 0], int2[:, 1])
+def sample_points_along_ray(point1, point2):
     
     diff = point2 - point1
-    points = point1.unsqueeze(1) + diff.unsqueeze(1) * t_values
-    
-    norm = torch.norm(diff, dim=-1).unsqueeze(-1)
-    norm = torch.clamp(norm, 1e-6, 1e6)
-    directions = diff / norm
+    length = torch.norm(diff, dim=-1, keepdim=True).clamp(1e-6, 1e6)
+    points = point1[:, None, :] + diff[:, None, :]  * t_values
+    directions = diff / length
 
     return points, directions
 
@@ -60,36 +57,62 @@ class RenderDatasetSph(Dataset):
         self.data = []
         self.test_datas = []
 
+        # Apri il file in modalità lettura
         with open(data_dir, 'r') as file:
+            # Leggi tutte le righe del file
             lines = file.readlines()
 
-            np.random.shuffle(lines)
-            test_data = lines[:100000]
-            train_data = lines[100000:]
-            train_data = train_data[:1000000]
-            self.data = train_data
-            self.test_datas = test_data
+            # Apri il file in modalità lettura
+            with open(data_dir, 'r') as file:
+                # Leggi tutte le righe del file
+                lines = file.readlines()
+
+                np.random.shuffle(lines)
+                test_data = lines[:100000]
+                train_data = lines[100000:]
+                #train_data = train_data[:5000000]
+                self.data = train_data
+                self.test_datas = test_data
 
         del lines
 
     def test_data(self):
         return self.test_datas
+    
+    def rendering(self):
+        num_samples = 1920 * 1080
+        np.random.shuffle(self.data)
+        return self.data[:num_samples]
 
     def __getitem__(self, index):
         return self.data[index]
 
     def __len__(self) -> int:
         return len(self.data)
+    
+class PositionalEncoder(nn.Module):
+    def __init__(self, num_frequencies):
+        super(PositionalEncoder, self).__init__()
+        self.num_frequencies = num_frequencies
 
-
-
+    def forward(self, x):
+        encoding = []
+        for i in range(self.num_frequencies):
+            for func in [torch.sin, torch.cos]:
+                encoding.append(func((2.0 ** i) * np.pi * x))
+        return torch.cat(encoding, dim=-1)
+    
 class NeuralNetwork(nn.Module):
     def __init__(self):
         super().__init__()
-        
+
+        num_frequencies = 2
+        #self.pos_encoder = PositionalEncoder(num_frequencies=num_frequencies)
+        #input_dim = 2 * 3 * num_frequencies  # Original input dimension + positional encoding dimensions
+
         self.level_dim = 1
         self.num_levels = 6
-        base_resolution = 8
+        base_resolution = 16
         self.encoder_label = GridEncoder(input_dim=3, num_levels=self.num_levels, level_dim=self.level_dim, base_resolution=base_resolution)
 
         self.model_label = nn.Sequential(
@@ -98,8 +121,8 @@ class NeuralNetwork(nn.Module):
         )
 
         self.level_dim2 = 4
-        self.num_levels2 = 5
-        base_resolution2 = 4
+        self.num_levels2 = 6
+        base_resolution2 = 16
         self.encoder_rgb = GridEncoder(input_dim=3, num_levels=self.num_levels2, level_dim=self.level_dim2, base_resolution=base_resolution2)
 
         self.model_rgb = nn.Sequential(
@@ -109,85 +132,97 @@ class NeuralNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 64),
             nn.ReLU(),
-            nn.Linear(64, 3),
+            nn.Linear(64, 3)
         )
+        self.num_points = 1
+        self.arange_points = torch.arange(self.num_points, device=device)
 
-    def predict(self, x):
-        return self.grids(x, self.model, self.encoder)
+        self.convert_time = torch.tensor(0, dtype=torch.float64)
+        self.sample_time = torch.tensor(0, dtype=torch.float64)
+        self.model_label_time = torch.tensor(0, dtype=torch.float64)
+        self.output_time = torch.tensor(0, dtype=torch.float64)
+        self.torch_grad_time = torch.tensor(0, dtype=torch.float64)
+        self.output_rgb_time = torch.tensor(0, dtype=torch.float64)
 
+    def setup(self, x):
+        
+        if x.size(0) != self.num_points:
+            self.num_points = x.size(0)
+            self.arange_points = torch.arange(self.num_points, device=device)
     
-    def forward(self, x, dist_true = None):
+    
+    def predict(self, x):
 
-        num_points = x.size(0)
+        self.setup(x)
+
         with torch.no_grad():
-            points_encoded, directions = sample_points_along_ray(x[:, :2], x[:, 2:4])
+            point1 = convert_spherical_to_cartesian(x[:, 0], x[:, 1])
+            point2 = convert_spherical_to_cartesian(x[:, 2], x[:, 3])
+            points_encoded, directions = sample_points_along_ray(point1, point2)
+            
+            output = self.model_label(self.encoder_label(points_encoded))
+            output = (output > 0.5).float()
 
-        output = self.encoder_label(points_encoded).reshape(num_points, int(n_points), -1)
-        output = self.model_label(output)
+            indices_first = torch.argmax(output, dim=1).view(-1)
+            points_encoded = points_encoded[self.arange_points, indices_first]
+            points_encoded = self.encoder_rgb(points_encoded)
+            points_encoded = torch.cat([directions, points_encoded], dim=-1)
+
+            output, _ = torch.max(output, dim=1)
+            output_rgb = self.model_rgb(points_encoded)
+
+        del points_encoded, directions
+
+        return output, output_rgb
+    
+    def forward(self, x, temp = None, dist_true=None):
+
+        self.setup(x)
+
+        with torch.no_grad():
+            point1 = convert_spherical_to_cartesian(x[:, 0], x[:, 1])
+            point2 = convert_spherical_to_cartesian(x[:, 2], x[:, 3])
+            points_encoded, directions = sample_points_along_ray(point1, point2)
+
+        output = self.model_label(self.encoder_label(points_encoded))
         output_hits, _ = torch.max(output, dim=1)
 
-        
-        # get the first voxel hitted
-        points_encoded = self.encoder_rgb(points_encoded)
-
         with torch.no_grad():
-            # get the first voxel hitted
-            all_labels = (output > 0.5).float()
-            indices_first = torch.argmax(all_labels, dim=1).view(-1)
-            indices_first = torch.clamp(indices_first, 2, n_points - 3)
+            indices_first = torch.argmax((output > 0.5).float(), dim=1).view(-1)
+            points_encoded = points_encoded[self.arange_points, indices_first]
 
-            num_points2 = torch.arange(num_points)
-        points_encoded = points_encoded[num_points2, indices_first]
-
-        
-        # add x to points_encoded
+        points_encoded = self.encoder_rgb(points_encoded)
         points_encoded = torch.cat([directions, points_encoded], dim=-1)
-
         output_rgb = self.model_rgb(points_encoded)
 
+        del points_encoded, directions
+
         return output_hits, output, indices_first, output_rgb
-    
-from torch.utils.data import DataLoader
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
-import torch.nn as nn
-import numpy as np
-
-
-decay_rate = 1e-3
-indices_decay = torch.arange(int(n_points), dtype=torch.float32, device=device)
-decay = -decay_rate * indices_decay
-max_decay = torch.max(decay)
-stable_decay = decay - max_decay
-exponential_decay = torch.exp(stable_decay).to(device)
-
-def find_index_with_exponential_decay(tensor):
-    # Creare un vettore di maschere usando la funzione sigmoide
-    threshold = 0.5
-    masks = torch.sigmoid(50*(tensor - threshold))
-    
-    # Calcolare le probabilità esponenziali normalizzate
-    probs = exponential_decay * masks
-    sum = torch.sum(probs, dim=1).unsqueeze(1)
-    probs = probs / sum
-    
-    # Calcolare l'indice ponderato
-    weighted_index = torch.sum(indices_decay * probs, dim=1)
-    
-    return weighted_index
 
 def loss_fn(output_label, labels, dist, all_outputs, output_rgb, rgb):
 
     mask = (labels > 0.5).squeeze()
 
-    # Applichiamo la soglia morbida
-    indices_first = find_index_with_exponential_decay(all_outputs.view(-1, int(n_points))).view(-1, 1) / (int(n_points))
-    
-    # L1 Loss tra gli indici soft e dist
-    loss1 = nn.L1Loss()(indices_first[mask], dist[mask])
-    loss0 = nn.BCELoss()(output_label, labels)
-    loss2 = nn.MSELoss()(output_rgb, rgb)
+    dist_indices = torch.clamp((dist[mask] * n_points).long().view(-1) - 1, 0, n_points - 2)
 
-    return loss0 + loss1 + loss2
+    rows = torch.arange(n_points).expand(all_outputs[mask].size(0), n_points).to(device)
+    mask2 = rows <= dist_indices.unsqueeze(1)
+
+    prev_hit = all_outputs[mask][mask2]
+    loss0 = nn.BCELoss()(prev_hit, torch.zeros_like(prev_hit))
+
+    dist_indices = torch.clamp((dist[mask] * n_points).long().view(-1), 0, n_points - 1)
+    mask3 = rows == dist_indices.unsqueeze(1)
+    hit = all_outputs[mask][mask3]
+    loss1 = nn.BCELoss()(hit, torch.ones_like(hit))
+
+    non_hit = all_outputs[~mask]
+    loss2 = nn.BCELoss()(non_hit, torch.zeros_like(non_hit))
+
+    # rgb loss
+    loss3 = nn.MSELoss()(output_rgb[mask], rgb[mask])
+
+    return loss0 + loss1 + loss2 + loss3
 
 
 def get_memory_usage():
@@ -199,7 +234,7 @@ def get_memory_usage():
 def train():
     # Device configuration
 
-    dataset = RenderDatasetSph(data_dir="C:/Users/miche/Downloads/test_neural_rgb (1).txt")
+    dataset = RenderDatasetSph(data_dir="C:/Users/miche/Downloads/test_neural_bunny.txt")
     dataset_loader = DataLoader(dataset,batch_size=2**13,shuffle=True)
 
     # Controlla lo stato della memoria iniziale
@@ -244,11 +279,10 @@ def train():
     total_step = len(dataset_loader)
 
     add_time_total = 0
-    for epoch in range(5):
+    for epoch in range(4):
         epoch_train_loss = 0
 
         add_time = 0
-
         
         for i, lines in enumerate(dataset_loader):
            
@@ -272,6 +306,7 @@ def train():
 
             epoch_train_loss += loss1.item()
 
+
             if i % 100 == 0:
                 print ('Epoch [{}/{}], Step [{}/{}], Loss: {:.4f}'
                             .format(epoch+1, 100, i+1, total_step, loss1.item()))
@@ -286,7 +321,7 @@ def train():
         all_preds_rgb = []
         with torch.no_grad():
             for i in range(0, len(test_set), 4096):
-                output, _, dist, output_rgb = model(test_set[i:i+4096], test_set_dist[i:i+4096])
+                output, _, dist, output_rgb = model(test_set[i:i+4096])
                 all_preds.append(output)
                 all_preds_rgb.append(output_rgb)
                 all_preds_dist.append((dist / n_points).view(-1, 1))
@@ -302,7 +337,6 @@ def train():
         all_dist_true = test_set_dist[mask]
         all_preds_rgb = all_preds_rgb[mask]
         all_rgb_true = test_set_rgb[mask]
-
 
         
         all_preds[all_preds > 0.5] = 1
@@ -320,7 +354,14 @@ def train():
         print(f"F1: {f1}")
         print(f"Dist L1: {dist_loss}")
         print(f"RGB L1: {rgb_loss}")
-    
+        
+        diff = torch.abs(all_preds_dist - all_dist_true)
+        percentili = torch.quantile(diff, torch.tensor([0.25, 0.5, 0.75, 0.9, 0.95, 0.99], device=device))
+        max = torch.max(diff)
+        print(f"Percentili test: {percentili}")
+        
+        print(f"Max diff test: {max}")
+
     show_camera(model)
     
 train()
