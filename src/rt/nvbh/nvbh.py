@@ -19,12 +19,11 @@ from torch.utils.data import DataLoader
 from sklearn.metrics import f1_score
 import torch.nn as nn
 import numpy as np
+from local_cache import generate_cache
 
 
 # Avvia il monitoraggio dell'allocazione della memoria
 tracemalloc.start()
-
-
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 n_points = 200
@@ -76,6 +75,19 @@ class RenderDatasetSph(Dataset):
 
         del lines
 
+    def data_cache(self):
+        lines = self.data[:2000000]
+        
+        lines = "\n".join(lines)
+        data = np.fromstring(lines, sep=' ').reshape(-1, 9)
+
+        para = torch.tensor(data[:, :4], device=device, dtype=torch.float32)
+        labels = torch.tensor(data[:, 4], device=device, dtype=torch.float32).view(-1, 1)
+        rgb = torch.tensor(data[:, 5:8], device=device, dtype=torch.float32) / 255
+        dist = torch.tensor(data[:, -1], device=device, dtype=torch.float32).view(-1, 1)
+
+        return para, labels, rgb, dist
+
     def test_data(self):
         return self.test_datas
     
@@ -90,26 +102,11 @@ class RenderDatasetSph(Dataset):
     def __len__(self) -> int:
         return len(self.data)
     
-class PositionalEncoder(nn.Module):
-    def __init__(self, num_frequencies):
-        super(PositionalEncoder, self).__init__()
-        self.num_frequencies = num_frequencies
-
-    def forward(self, x):
-        encoding = []
-        for i in range(self.num_frequencies):
-            for func in [torch.sin, torch.cos]:
-                encoding.append(func((2.0 ** i) * np.pi * x))
-        return torch.cat(encoding, dim=-1)
-    
 class NeuralNetwork(nn.Module):
-    def __init__(self):
+    def __init__(self, cache):
         super().__init__()
 
-        num_frequencies = 2
-        #self.pos_encoder = PositionalEncoder(num_frequencies=num_frequencies)
-        #input_dim = 2 * 3 * num_frequencies  # Original input dimension + positional encoding dimensions
-
+        self.cache = cache
         self.level_dim = 1
         self.num_levels = 6
         base_resolution = 16
@@ -136,13 +133,6 @@ class NeuralNetwork(nn.Module):
         )
         self.num_points = 1
         self.arange_points = torch.arange(self.num_points, device=device)
-
-        self.convert_time = torch.tensor(0, dtype=torch.float64)
-        self.sample_time = torch.tensor(0, dtype=torch.float64)
-        self.model_label_time = torch.tensor(0, dtype=torch.float64)
-        self.output_time = torch.tensor(0, dtype=torch.float64)
-        self.torch_grad_time = torch.tensor(0, dtype=torch.float64)
-        self.output_rgb_time = torch.tensor(0, dtype=torch.float64)
 
     def setup(self, x):
         
@@ -175,7 +165,7 @@ class NeuralNetwork(nn.Module):
 
         return output, output_rgb
     
-    def forward(self, x, temp = None, dist_true=None):
+    def forward(self, x):
 
         self.setup(x)
 
@@ -237,10 +227,14 @@ def train():
     dataset = RenderDatasetSph(data_dir="C:/Users/miche/Downloads/test_neural_bunny.txt")
     dataset_loader = DataLoader(dataset,batch_size=2**13,shuffle=True)
 
+    para_cache, labels_cache, _, dist_cache = dataset.data_cache()
+    cache = generate_cache(n_points, para_cache, dist_cache,labels_cache)
+
     # Controlla lo stato della memoria iniziale
     print(f"Memory usage: {get_memory_usage()}")
-    model = NeuralNetwork().to(device)
+    model = NeuralNetwork(cache).to(device)
     print(f"Memory usage: {get_memory_usage()}")
+
 
 
     test_set = []
@@ -272,7 +266,6 @@ def train():
     test_set_dist = torch.stack(test_set_dist).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
-    #scheduler = lr_scheduler.StepLR(optimizer, step_size=5, gamma=0.1)
 
 
     # Train the model
